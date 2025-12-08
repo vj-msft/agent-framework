@@ -1,0 +1,83 @@
+### Enterprise Chat Agent - Demo Requests
+### Use with VS Code REST Client extension or similar
+
+@baseUrl = http://localhost:7071/api
+
+### ============================================================
+### Health Check
+### ============================================================
+
+### Check API health
+GET {{baseUrl}}/health
+
+### ============================================================
+### Thread Management
+### ============================================================
+
+### Create a new thread
+# @name createThread
+POST {{baseUrl}}/threads
+Content-Type: application/json
+
+{
+  "metadata": {
+    "user_id": "user_123",
+    "session_type": "support"
+  }
+}
+
+### Get thread ID from response
+@threadId = {{createThread.response.body.id}}
+
+### Get thread details
+GET {{baseUrl}}/threads/{{threadId}}
+
+### ============================================================
+### Tool Selection Examples
+### ============================================================
+
+### Example 1: Single Tool - Weather
+POST {{baseUrl}}/threads/{{threadId}}/messages
+Content-Type: application/json
+
+{
+  "content": "What's the weather in Seattle?"
+}
+
+### Example 2: Single Tool - Calculator
+POST {{baseUrl}}/threads/{{threadId}}/messages
+Content-Type: application/json
+
+{
+  "content": "Calculate 15% tip on $85"
+}
+
+### Example 3: Multiple Tools - Weather + Calculator
+POST {{baseUrl}}/threads/{{threadId}}/messages
+Content-Type: application/json
+
+{
+  "content": "What's the weather in Tokyo and what's 20% of 150?"
+}
+
+### Example 4: No Tools Needed
+POST {{baseUrl}}/threads/{{threadId}}/messages
+Content-Type: application/json
+
+{
+  "content": "Hello! How are you today?"
+}
+
+### ============================================================
+### Conversation History
+### ============================================================
+
+### Get all messages in thread
+GET {{baseUrl}}/threads/{{threadId}}/messages
+
+### ============================================================
+### Cleanup
+### ============================================================
+
+### Delete thread
+DELETE {{baseUrl}}/threads/{{threadId}}

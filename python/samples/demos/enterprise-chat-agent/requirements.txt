@@ -1,0 +1,17 @@
+# Azure Functions
+azure-functions>=1.21.0
+
+# Microsoft Agent Framework
+# TODO: Uncomment when packages are published to PyPI
+# microsoft-agents-core
+# microsoft-agents-ai-azure
+
+# Azure SDK
+azure-identity>=1.15.0
+azure-cosmos>=4.7.0
+
+# Azure OpenAI (used directly until Agent Framework packages are published)
+openai>=1.0.0
+
+# Utilities
+pydantic>=2.0.0
