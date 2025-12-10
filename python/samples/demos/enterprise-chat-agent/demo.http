@@ -20,9 +20,11 @@ POST {{baseUrl}}/threads
 Content-Type: application/json
 
 {
+  "user_id": "user_123",
+  "title": "Customer Support Chat",
   "metadata": {
-    "user_id": "user_123",
-    "session_type": "support"
+    "session_type": "support",
+    "department": "technical"
   }
 }
 
@@ -41,7 +43,7 @@ POST {{baseUrl}}/threads/{{threadId}}/messages
 Content-Type: application/json
 
 {
-  "content": "What's the weather in Seattle?"
+  "content": "What's the weather in New York?"
 }
 
 ### Example 2: Single Tool - Calculator

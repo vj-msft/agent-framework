@@ -2,9 +2,7 @@
 azure-functions>=1.21.0
 
 # Microsoft Agent Framework
-# TODO: Uncomment when packages are published to PyPI
-# microsoft-agents-core
-# microsoft-agents-ai-azure
+agent-framework --pre
 
 # Azure SDK
 azure-identity>=1.15.0
@@ -12,6 +10,17 @@ azure-cosmos>=4.7.0
 
 # Azure OpenAI (used directly until Agent Framework packages are published)
 openai>=1.0.0
+
+# OpenTelemetry Core
+opentelemetry-api>=1.25.0
+opentelemetry-sdk>=1.25.0
+
+# OpenTelemetry Exporters
+opentelemetry-exporter-otlp>=1.25.0
+azure-monitor-opentelemetry-exporter>=1.0.0b41
+
+# OpenTelemetry Semantic Conventions (matches agent_framework)
+opentelemetry-semantic-conventions-ai>=0.4.13
 
 # Utilities
 pydantic>=2.0.0

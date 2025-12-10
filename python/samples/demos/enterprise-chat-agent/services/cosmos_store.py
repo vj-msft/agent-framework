@@ -75,27 +75,42 @@ class CosmosConversationStore:
     # Thread Operations
     # -------------------------------------------------------------------------
 
-    async def create_thread(self, thread_id: str, metadata: dict | None = None) -> dict:
+    async def create_thread(
+        self,
+        thread_id: str,
+        user_id: str,
+        title: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
         """
         Create a new conversation thread.
 
         Args:
             thread_id: Unique thread identifier.
-            metadata: Optional metadata (user_id, session_type, etc.).
+            user_id: Owner's user ID.
+            title: Optional thread title.
+            metadata: Optional custom metadata.
 
         Returns:
             The created thread document.
         """
+        now = datetime.now(timezone.utc).isoformat()
         thread = {
             "id": thread_id,
             "thread_id": thread_id,  # Partition key
             "type": "thread",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "user_id": user_id,
+            "title": title,
+            "status": "active",
+            "message_count": 0,
+            "created_at": now,
+            "updated_at": now,
+            "last_message_preview": None,
             "metadata": metadata or {},
         }
 
         self.container.create_item(body=thread)
-        logging.info(f"Created thread {thread_id} in Cosmos DB")
+        logging.info(f"Created thread {thread_id} for user {user_id} in Cosmos DB")
         return thread
 
     async def get_thread(self, thread_id: str) -> dict | None:
@@ -158,32 +173,51 @@ class CosmosConversationStore:
         role: str,
         content: str,
         tool_calls: list[dict] | None = None,
+        sources: list[dict] | None = None,
+        metadata: dict | None = None,
     ) -> dict:
         """
-        Add a message to a thread.
+        Add a message to a thread and update thread metadata.
 
         Args:
             thread_id: Thread identifier (partition key).
             message_id: Unique message identifier.
-            role: Message role ('user' or 'assistant').
+            role: Message role ('user', 'assistant', or 'system').
             content: Message content.
             tool_calls: Optional list of tool calls made by the agent.
+            sources: Optional RAG sources (for assistant messages).
+            metadata: Optional custom metadata.
 
         Returns:
             The created message document.
         """
         message = {
             "id": message_id,
+            "message_id": message_id,
             "thread_id": thread_id,  # Partition key
             "type": "message",
             "role": role,
             "content": content,
-            "tool_calls": tool_calls,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tool_calls": tool_calls,
+            "sources": sources,
+            "metadata": metadata or {},
         }
 
         self.container.create_item(body=message)
         logging.info(f"Added {role} message {message_id} to thread {thread_id}")
+
+        # Update thread metadata
+        thread = await self.get_thread(thread_id)
+        if thread:
+            # Truncate content for preview (first 100 chars)
+            preview = content[:100] + "..." if len(content) > 100 else content
+            await self.update_thread(
+                thread_id=thread_id,
+                message_count=thread.get("message_count", 0) + 1,
+                last_message_preview=preview,
+            )
+
         return message
 
     async def get_messages(
@@ -217,6 +251,47 @@ class CosmosConversationStore:
         )
 
         return messages
+
+    async def update_thread(
+        self,
+        thread_id: str,
+        title: str | None = None,
+        status: str | None = None,
+        message_count: int | None = None,
+        last_message_preview: str | None = None,
+    ) -> dict | None:
+        """
+        Update thread metadata.
+
+        Args:
+            thread_id: Thread identifier.
+            title: New title (optional).
+            status: New status - 'active', 'archived', or 'deleted' (optional).
+            message_count: New message count (optional).
+            last_message_preview: Preview of last message (optional).
+
+        Returns:
+            Updated thread document or None if not found.
+        """
+        thread = await self.get_thread(thread_id)
+        if thread is None:
+            return None
+
+        # Update fields
+        if title is not None:
+            thread["title"] = title
+        if status is not None:
+            thread["status"] = status
+        if message_count is not None:
+            thread["message_count"] = message_count
+        if last_message_preview is not None:
+            thread["last_message_preview"] = last_message_preview
+
+        thread["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        updated = self.container.replace_item(item=thread_id, body=thread)
+        logging.info(f"Updated thread {thread_id}")
+        return updated
 
     async def thread_exists(self, thread_id: str) -> bool:
         """
