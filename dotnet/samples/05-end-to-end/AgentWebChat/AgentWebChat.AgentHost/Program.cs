@@ -28,6 +28,10 @@ builder.AddDevUI();
 builder.AddOpenAIChatCompletions();
 builder.AddOpenAIResponses();
 
+// When running in production, make sure to use an SessionIsolationKeyProvider, e.g. ClaimsIdentity-based
+// if using Claims-based Identity for Authentication/Authorization
+// builder.Services.UseClaimsBasedSessionIsolation(new() { ClaimType = ClaimTypes.NameIdentifier });
+
 var pirateAgentBuilder = builder.AddAIAgent(
     "pirate",
     instructions: "You are a pirate. Speak like a pirate",
@@ -148,6 +152,10 @@ builder.Services.AddKeyedSingleton<AIAgent>("my-di-matchingname-agent", (sp, nam
 pirateAgentBuilder.AddA2AServer();
 knightsKnavesAgentBuilder.AddA2AServer();
 
+// When running in production, make sure to use an SessionIsolationKeyProvider, e.g. ClaimsIdentity-based
+// if using Claims-based Identity for Authentication/Authorization
+// builder.Services.UseClaimsBasedSessionIsolation(new() { ClaimType = ClaimTypes.NameIdentifier });
+
 var app = builder.Build();
 
 app.MapOpenApi();
@@ -163,10 +171,22 @@ app.MapA2AHttpJson(knightsKnavesAgentBuilder, path: "/a2a/knights-and-knaves");
 app.MapDevUI();
 
 app.MapOpenAIResponses();
+app.MapOpenAIResponses(pirateAgentBuilder);
+app.MapOpenAIResponses(knightsKnavesAgentBuilder);
+app.MapOpenAIResponses(chemistryAgent);
+app.MapOpenAIResponses(mathsAgent);
+app.MapOpenAIResponses(literatureAgent);
+app.MapOpenAIResponses(scienceSequentialWorkflow);
+app.MapOpenAIResponses(scienceConcurrentWorkflow);
 app.MapOpenAIConversations();
 
 app.MapOpenAIChatCompletions(pirateAgentBuilder);
 app.MapOpenAIChatCompletions(knightsKnavesAgentBuilder);
+app.MapOpenAIChatCompletions(chemistryAgent);
+app.MapOpenAIChatCompletions(mathsAgent);
+app.MapOpenAIChatCompletions(literatureAgent);
+app.MapOpenAIChatCompletions(scienceSequentialWorkflow);
+app.MapOpenAIChatCompletions(scienceConcurrentWorkflow);
 
 // Map the agents HTTP endpoints
 app.MapAgentDiscovery("/agents");

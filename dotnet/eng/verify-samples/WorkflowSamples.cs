@@ -441,15 +441,6 @@ internal static class WorkflowSamples
 
         new SampleDefinition
         {
-            Name = "Workflow_Declarative_GenerateCode",
-            ProjectPath = "samples/03-workflows/Declarative/GenerateCode",
-            IsDeterministic = true,
-            MustContain = ["WORKFLOW: Parsing", "WORKFLOW: Defined"],
-            ExpectedOutputDescription = ["The output should show a YAML workflow being parsed and C# code being generated from it."],
-        },
-
-        new SampleDefinition
-        {
             Name = "Workflow_Declarative_HostedWorkflow",
             ProjectPath = "samples/03-workflows/Declarative/HostedWorkflow",
             RequiredEnvironmentVariables = ["AZURE_AI_PROJECT_ENDPOINT"],
@@ -476,6 +467,17 @@ internal static class WorkflowSamples
             Inputs = ["What's the soup of the day?", "EXIT"],
             InputDelayMs = 8000,
             ExpectedOutputDescription = ["The output should show a workflow invoking a function tool (e.g. a menu plugin) to answer a question about the soup of the day."],
+        },
+
+        new SampleDefinition
+        {
+            Name = "Workflow_Declarative_InvokeFoundryToolboxMcp",
+            ProjectPath = "samples/03-workflows/Declarative/InvokeFoundryToolboxMcp",
+            RequiredEnvironmentVariables = ["AZURE_AI_PROJECT_ENDPOINT"],
+            OptionalEnvironmentVariables = ["AZURE_AI_MODEL_DEPLOYMENT_NAME", "FOUNDRY_TOOLBOX_NAME", "FOUNDRY_AGENT_TOOLSET_API_VERSION"],
+            Inputs = ["How do I use Azure OpenAI with my data?"],
+            InputDelayMs = 3000,
+            ExpectedOutputDescription = ["The output should show a workflow using Foundry Toolbox MCP tools to search Microsoft Learn documentation and web search to provide a summary of results."],
         },
 
         new SampleDefinition

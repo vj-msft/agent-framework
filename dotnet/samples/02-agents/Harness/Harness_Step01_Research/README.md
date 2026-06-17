@@ -1,10 +1,11 @@
-# What this sample demonstrates
+﻿# What this sample demonstrates
 
-This sample demonstrates how to use a `ChatClientAgent` with the Harness `AIContextProviders` (`TodoProvider` and `AgentModeProvider`) for interactive research tasks with web search capabilities powered by Azure AI Foundry.
+This sample demonstrates how to use a `HarnessAgent` with the Harness `AIContextProviders` (`TodoProvider` and `AgentModeProvider`) for interactive research tasks with web search capabilities powered by Azure AI Foundry. The `HarnessAgent` pre-configures function invocation, per-service-call chat history persistence, and context-window compaction.
 
 Key features showcased:
 
-- **ChatClientAgent** — configured directly with Harness providers for planning and task management
+- **HarnessAgent** — a pre-configured agent that wraps a `ChatClientAgent` with function invocation, per-service-call persistence, and context-window compaction
+- **ToolApproval** — the agent is wrapped with `UseToolApproval()` to allow auto-approving tools once confirmed
 - **Web Search** — the agent can search the web for current information via `ResponseTool.CreateWebSearchTool()`
 - **TodoProvider** — the agent creates and manages a todo list to track research questions
 - **AgentModeProvider** — the agent switches between "plan" mode (breaking down the topic) and "execute" mode (answering each research question)
@@ -29,7 +30,7 @@ Set the following environment variables:
 export AZURE_FOUNDRY_OPENAI_ENDPOINT="https://your-project.services.ai.azure.com/openai/v1/"
 
 # Optional: Model deployment name (defaults to gpt-5.4)
-export AZURE_AI_MODEL_DEPLOYMENT_NAME="gpt-5.4"
+export FOUNDRY_MODEL="gpt-5.4"
 ```
 
 ## Running the Sample

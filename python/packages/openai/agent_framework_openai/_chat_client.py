@@ -120,6 +120,9 @@ OPENAI_LOCAL_SHELL_CALL_ITEM_ID_KEY = "openai.responses.local_shell.call_item_id
 OPENAI_LOCAL_SHELL_COMMAND_PARTS_KEY = "openai.local_shell_command_parts"
 OPENAI_SHELL_OUTPUT_TYPE_SHELL_CALL = "shell_call_output"
 OPENAI_SHELL_OUTPUT_TYPE_LOCAL_SHELL_CALL = "local_shell_call_output"
+_AZURE_AI_SEARCH_CALL_OUTPUT_TYPE = "azure_ai_search_call_output"
+_AZURE_AI_SEARCH_OUTPUT_EVENT_TYPES = {"response.output_item.added", "response.output_item.done"}
+_AZURE_AI_SEARCH_OUTPUT_EVENT_PREFIX = "response.azure_ai_search_call_output."
 
 # Internal marker emitted by `_prepare_content_for_openai` for an
 # `mcp_server_tool_result` Content. The Responses API expects an `mcp_call`
@@ -359,6 +362,14 @@ class RawOpenAIChatClient(  # type: ignore[misc]
     STORES_BY_DEFAULT: ClassVar[bool] = True  # type: ignore[reportIncompatibleVariableOverride, misc]
     SUPPORTS_RICH_FUNCTION_OUTPUT: ClassVar[bool] = True
 
+    # Azure OpenAI Responses API may include this header in responses naming the actual model that
+    # served the request (e.g. ``gpt-5-nano-2025-08-07``), which can differ from the deployment alias
+    # that the request was addressed to and that ``response.model`` reports. When present, we use it
+    # as the value of ``ChatResponse.model`` / ``ChatResponseUpdate.model`` so telemetry and callers
+    # see the actually served model. (Chat Completions API already returns the snapshot in
+    # ``response.model``, so this header only matters for the Responses API.)
+    SERVED_MODEL_HEADER: ClassVar[str] = "x-ms-served-model"
+
     FILE_SEARCH_MAX_RESULTS: int = 50
 
     @overload
@@ -377,6 +388,7 @@ class RawOpenAIChatClient(  # type: ignore[misc]
         additional_properties: dict[str, Any] | None = None,
         env_file_path: str | None = None,
         env_file_encoding: str | None = None,
+        timeout: float | None = None,
     ) -> None:
         """Initialize a raw OpenAI Chat client.
 
@@ -398,6 +410,7 @@ class RawOpenAIChatClient(  # type: ignore[misc]
             env_file_path: Optional ``.env`` file that is checked before the process environment
                 for ``OPENAI_*`` values.
             env_file_encoding: Encoding for the ``.env`` file.
+            timeout: Optional timeout in seconds for requests.
         """
         ...
 
@@ -419,6 +432,7 @@ class RawOpenAIChatClient(  # type: ignore[misc]
         additional_properties: dict[str, Any] | None = None,
         env_file_path: str | None = None,
         env_file_encoding: str | None = None,
+        timeout: float | None = None,
     ) -> None:
         """Initialize a raw OpenAI Chat client.
 
@@ -447,6 +461,7 @@ class RawOpenAIChatClient(  # type: ignore[misc]
             env_file_path: Optional ``.env`` file that is checked before process environment
                 variables for ``AZURE_OPENAI_*`` values.
             env_file_encoding: Encoding for the ``.env`` file.
+            timeout: Optional timeout in seconds for requests.
         """
         ...
 
@@ -468,6 +483,7 @@ class RawOpenAIChatClient(  # type: ignore[misc]
         additional_properties: dict[str, Any] | None = None,
         env_file_path: str | None = None,
         env_file_encoding: str | None = None,
+        timeout: float | None = None,
     ) -> None:
         """Initialize a raw OpenAI Chat client.
 
@@ -503,6 +519,8 @@ class RawOpenAIChatClient(  # type: ignore[misc]
                 variables. The same file is used for both ``OPENAI_*`` and ``AZURE_OPENAI_*``
                 lookups.
             env_file_encoding: Encoding for the ``.env`` file.
+            timeout: HTTP timeout in seconds for requests. When not provided, the
+                OpenAI SDK default is used (connect: 5s, total: 600s).
 
         Notes:
             Environment resolution and routing precedence are:
@@ -533,6 +551,7 @@ class RawOpenAIChatClient(  # type: ignore[misc]
             openai_model_fields=("chat_model", "model"),
             azure_model_fields=("chat_model", "model"),
             responses_mode=True,
+            timeout=timeout,
         )
 
         self.client = client
@@ -606,25 +625,44 @@ class RawOpenAIChatClient(  # type: ignore[misc]
             function_call_ids: dict[int, tuple[str, str]] = {}
             seen_reasoning_delta_item_ids: set[str] = set()
             validated_options: dict[str, Any] | None = None
+            # Captured once request options are validated/prepared so the streaming finalizer can
+            # still parse the aggregated response into structured output after the stream completes.
+            response_format: Any | None = None
+
+            def _finalize_with_captured_format(updates: Sequence[ChatResponseUpdate]) -> ChatResponse[Any]:
+                # ResponseStream only calls the finalizer after iterating or draining `_stream()`,
+                # so `response_format` has already been populated from the validated request state
+                # unless request setup failed before streaming began.
+                return self._finalize_response_updates(updates, response_format=response_format)
 
             async def _stream() -> AsyncIterable[ChatResponseUpdate]:
-                nonlocal validated_options
+                nonlocal response_format, validated_options
                 if continuation_token is not None:
                     # Resume a background streaming response by retrieving with stream=True
                     client = self.client
                     validated_options = await self._validate_options(options)
+                    response_format = validated_options.get("response_format")
                     try:
-                        stream_response = await client.responses.retrieve(
+                        raw_stream_response = await client.responses.with_raw_response.retrieve(
                             continuation_token["response_id"],
                             stream=True,
                         )
-                        async for chunk in stream_response:
-                            yield self._parse_chunk_from_openai(
-                                chunk,
-                                options=validated_options,
-                                function_call_ids=function_call_ids,
-                                seen_reasoning_delta_item_ids=seen_reasoning_delta_item_ids,
-                            )
+                        # Read headers defensively: telemetry instrumentors (e.g. azure-ai-projects
+                        # experimental tracing) wrap the streaming response in objects that do not
+                        # proxy ``.headers``. Degrade gracefully so the served-model surfacing is
+                        # best-effort instead of crashing the whole call.
+                        served_model = self._extract_served_model(getattr(raw_stream_response, "headers", None))
+                        async with raw_stream_response.parse() as stream_response:
+                            async for chunk in stream_response:
+                                update = self._parse_chunk_from_openai(
+                                    chunk,
+                                    options=validated_options,
+                                    function_call_ids=function_call_ids,
+                                    seen_reasoning_delta_item_ids=seen_reasoning_delta_item_ids,
+                                )
+                                if served_model is not None:
+                                    update.model = served_model
+                                yield update
                     except Exception as ex:
                         self._handle_request_error(ex)
                 else:
@@ -633,8 +671,15 @@ class RawOpenAIChatClient(  # type: ignore[misc]
                         run_options,
                         validated_options,
                     ) = await self._prepare_request(messages, options)
+                    response_format = validated_options.get("response_format")
                     try:
                         if "text_format" in run_options:
+                            # The SDK's ``responses.stream(text_format=...)`` helper preserves
+                            # client-side ``output_parsed`` partial parsing for structured outputs,
+                            # but it does not expose the raw HTTP response (no ``x-ms-served-model``
+                            # access). We accept that trade-off: this single streaming path keeps
+                            # the deployment alias as the reported model name. All other paths
+                            # surface the served-model header.
                             async with client.responses.stream(**run_options) as response:
                                 async for chunk in response:
                                     yield self._parse_chunk_from_openai(
@@ -644,18 +689,26 @@ class RawOpenAIChatClient(  # type: ignore[misc]
                                         seen_reasoning_delta_item_ids=seen_reasoning_delta_item_ids,
                                     )
                         else:
-                            async for chunk in await client.responses.create(stream=True, **run_options):
-                                yield self._parse_chunk_from_openai(
-                                    chunk,
-                                    options=validated_options,
-                                    function_call_ids=function_call_ids,
-                                    seen_reasoning_delta_item_ids=seen_reasoning_delta_item_ids,
-                                )
+                            raw_create_response = await client.responses.with_raw_response.create(
+                                stream=True, **run_options
+                            )
+                            # See note above on ``raw_stream_response.headers``.
+                            served_model = self._extract_served_model(getattr(raw_create_response, "headers", None))
+                            async with raw_create_response.parse() as stream_response:
+                                async for chunk in stream_response:
+                                    update = self._parse_chunk_from_openai(
+                                        chunk,
+                                        options=validated_options,
+                                        function_call_ids=function_call_ids,
+                                        seen_reasoning_delta_item_ids=seen_reasoning_delta_item_ids,
+                                    )
+                                    if served_model is not None:
+                                        update.model = served_model
+                                    yield update
                     except Exception as ex:
                         self._handle_request_error(ex)
 
-            response_format = validated_options.get("response_format") if validated_options else None
-            return self._build_response_stream(_stream(), response_format=response_format)
+            return ResponseStream(_stream(), finalizer=_finalize_with_captured_format)
 
         # Non-streaming
         async def _get_response() -> ChatResponse:
@@ -664,10 +717,15 @@ class RawOpenAIChatClient(  # type: ignore[misc]
                 client = self.client
                 validated_options = await self._validate_options(options)
                 try:
-                    response = await client.responses.retrieve(continuation_token["response_id"])
+                    raw_response = await client.responses.with_raw_response.retrieve(continuation_token["response_id"])
+                    response = raw_response.parse()
                 except Exception as ex:
                     self._handle_request_error(ex)
                 chat_response = self._parse_response_from_openai(response, options=validated_options)
+                # See note above on ``raw_stream_response.headers``.
+                served_model = self._extract_served_model(getattr(raw_response, "headers", None))
+                if served_model is not None:
+                    chat_response.model = served_model
                 # Once the background response completes, drop the continuation_token from
                 # the caller's options dict. FunctionInvocationLayer reuses the same dict
                 # across tool-loop iterations, so leaving it in place makes the next iteration
@@ -680,14 +738,51 @@ class RawOpenAIChatClient(  # type: ignore[misc]
             client, run_options, validated_options = await self._prepare_request(messages, options)
             try:
                 if "text_format" in run_options:
-                    response = await client.responses.parse(stream=False, **run_options)
+                    raw_response = await client.responses.with_raw_response.parse(stream=False, **run_options)  # type: ignore
                 else:
-                    response = await client.responses.create(stream=False, **run_options)
+                    raw_response = await client.responses.with_raw_response.create(stream=False, **run_options)  # type: ignore
+                response = raw_response.parse()
             except Exception as ex:
                 self._handle_request_error(ex)
-            return self._parse_response_from_openai(response, options=validated_options)
+            chat_response = self._parse_response_from_openai(response, options=validated_options)
+            # See note above on ``raw_stream_response.headers``.
+            served_model = self._extract_served_model(getattr(raw_response, "headers", None))
+            if served_model is not None:
+                chat_response.model = served_model
+            return chat_response
 
         return _get_response()
+
+    @override
+    def _finalize_response_updates(
+        self,
+        updates: Sequence[ChatResponseUpdate],
+        *,
+        response_format: Any | None = None,
+    ) -> ChatResponse[Any]:
+        """Finalize streamed updates and add post-stream Azure AI Search citation metadata."""
+        self._enrich_streamed_azure_ai_search_citations(updates)
+        self._enrich_mcp_search_citations([content for update in updates for content in update.contents])
+        return super()._finalize_response_updates(updates, response_format=response_format)
+
+    @classmethod
+    def _extract_served_model(cls, headers: Any) -> str | None:
+        """Return the Azure OpenAI ``x-ms-served-model`` response header value when present.
+
+        Azure OpenAI Responses API returns the deployment alias in ``response.model`` but the actual
+        snapshot served via the ``x-ms-served-model`` response header (e.g. ``gpt-5-nano-2025-08-07``
+        vs deployment alias ``gpt-5-nano``). When present, the served snapshot is the source of truth
+        for observability and downstream callers. Empty/whitespace-only header values are rejected
+        here so every caller can simply check ``if served_model is not None``.
+        """
+        if headers is None:
+            return None
+        served_model = headers.get(cls.SERVED_MODEL_HEADER)
+        if isinstance(served_model, str):
+            stripped = served_model.strip()
+            if stripped:
+                return stripped
+        return None
 
     def _prepare_response_and_text_format(
         self,
@@ -1382,10 +1477,21 @@ class RawOpenAIChatClient(  # type: ignore[misc]
         Returns:
             The prepared chat messages for a request.
         """
+        drops_reasoning_without_storage = not request_uses_service_side_storage and any(
+            content.type == "text_reasoning" for message in chat_messages for content in message.contents
+        )
+        drop_mcp_call_ids: set[str] = set()
+        if drops_reasoning_without_storage:
+            for message in chat_messages:
+                for content in message.contents:
+                    if content.type == "mcp_server_tool_call" and content.call_id:
+                        drop_mcp_call_ids.add(content.call_id)
+
         list_of_list = [
             self._prepare_message_for_openai(
                 message,
                 request_uses_service_side_storage=request_uses_service_side_storage,
+                drop_mcp_call_ids=drop_mcp_call_ids,
             )
             for message in chat_messages
         ]
@@ -1400,6 +1506,7 @@ class RawOpenAIChatClient(  # type: ignore[misc]
         message: Message,
         *,
         request_uses_service_side_storage: bool = True,
+        drop_mcp_call_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Prepare a chat message for the OpenAI Responses API format."""
         all_messages: list[dict[str, Any]] = []
@@ -1409,29 +1516,35 @@ class RawOpenAIChatClient(  # type: ignore[misc]
         }
         additional_properties = message.additional_properties
         replays_local_storage = "_attribution" in additional_properties
-        uses_service_side_storage = request_uses_service_side_storage and not replays_local_storage
-        # Reasoning items are only valid in input when they directly preceded a function_call
-        # in the same response. Including a reasoning item that preceded a text response
-        # (i.e. no function_call in the same message) causes an API error:
-        # "reasoning was provided without its required following item."
-        #
-        # Local storage is stricter: response-scoped reasoning items (rs_*) cannot be replayed
-        # back to the service unless that message is using service-side storage.
-        # In that mode we omit reasoning items and rely on function call + tool output replay.
-        has_function_call = any(c.type == "function_call" for c in message.contents)
+        # Server-issued response item identities (function_call fc_*, reasoning rs_*, approval IDs,
+        # local-shell-call IDs) must not be re-sent inline when the request carries
+        # previous_response_id / conversation_id / conversation: the server already has them via
+        # the prior response and rejects duplicates with "Duplicate item found with id ...".
+        # function_result keeps its call_id and the server pairs it to the prior function_call via
+        # that key. See microsoft/agent-framework#3295. The strip is gated on the request-level
+        # flag, not a message-level one: HistoryProvider-attributed messages
+        # (replays_local_storage) still need stripping when the request also carries a continuation
+        # marker, since the server-stored items would otherwise duplicate the inline ones. Without
+        # storage, standalone reasoning items are invalid per the API ("reasoning was provided
+        # without its required following item"), so the reasoning branch always drops. When that
+        # happens, `_prepare_messages_for_openai` also drops the paired hosted-MCP IDs across
+        # message boundaries rather than replaying bare MCP items.
+        drop_mcp_call_ids = drop_mcp_call_ids or set()
         for content in message.contents:
             match content.type:
                 case "text_reasoning":
-                    if not uses_service_side_storage or not has_function_call:
-                        continue  # reasoning not followed by a function_call is invalid in input
-                    reasoning = self._prepare_content_for_openai(
-                        message.role,
-                        content,
-                        replays_local_storage=replays_local_storage,
-                    )
-                    if reasoning:
-                        all_messages.append(reasoning)
+                    continue
                 case "function_result":
+                    if request_uses_service_side_storage:
+                        props = content.additional_properties or {}
+                        # Local-shell variant serializes as `local_shell_call` carrying a server-issued id;
+                        # plain function_call_output pairs by call_id and is safe under storage.
+                        if props.get(
+                            OPENAI_SHELL_OUTPUT_TYPE_KEY
+                        ) == OPENAI_SHELL_OUTPUT_TYPE_LOCAL_SHELL_CALL and props.get(
+                            OPENAI_LOCAL_SHELL_CALL_ITEM_ID_KEY
+                        ):
+                            continue
                     new_args: dict[str, Any] = {}
                     new_args.update(
                         self._prepare_content_for_openai(
@@ -1443,6 +1556,8 @@ class RawOpenAIChatClient(  # type: ignore[misc]
                     if new_args:
                         all_messages.append(new_args)
                 case "function_call":
+                    if request_uses_service_side_storage:
+                        continue
                     function_call = self._prepare_content_for_openai(
                         message.role,
                         content,
@@ -1451,6 +1566,8 @@ class RawOpenAIChatClient(  # type: ignore[misc]
                     if function_call:
                         all_messages.append(function_call)
                 case "function_approval_response" | "function_approval_request":
+                    if request_uses_service_side_storage:
+                        continue
                     prepared = self._prepare_content_for_openai(
                         message.role,
                         content,
@@ -1463,6 +1580,15 @@ class RawOpenAIChatClient(  # type: ignore[misc]
                     # top-level mcp_call input item; the result side emits an
                     # internal marker that `_prepare_messages_for_openai`
                     # coalesces onto the matching call (or drops if unmatched).
+                    # The mcp_call item carries the model-emitted call_id as its
+                    # server-side `id`, so under continuation it would duplicate
+                    # the prior response's items (#3295). Drop the call here; the
+                    # orphan result is dropped by the coalesce step that follows.
+                    #
+                    # Without storage, a reasoning + hosted-MCP pair cannot be replayed
+                    # partially: reasoning is stripped above, and a bare mcp_call is rejected.
+                    if request_uses_service_side_storage or content.call_id in drop_mcp_call_ids:
+                        continue
                     prepared_mcp = self._prepare_content_for_openai(
                         message.role,
                         content,
@@ -1838,6 +1964,182 @@ class RawOpenAIChatClient(  # type: ignore[misc]
         return value
 
     @staticmethod
+    def _parse_azure_ai_search_output_payload(output: Any) -> Mapping[str, Any] | None:
+        """Parse an Azure AI Search tool output payload from a streamed Responses event."""
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except json.JSONDecodeError:
+                logger.debug("Unable to parse Azure AI Search call output JSON.", exc_info=True)
+                return None
+
+        output = RawOpenAIChatClient._serialize_provider_payload(output)
+        if isinstance(output, Mapping):
+            return cast("Mapping[str, Any]", output)
+        return None
+
+    @staticmethod
+    def _extract_azure_ai_search_output_payload(event: Any) -> Mapping[str, Any] | None:
+        """Return Azure AI Search output payload from either a top-level event or its nested item."""
+        payload = RawOpenAIChatClient._parse_azure_ai_search_output_payload(getattr(event, "output", None))
+        if payload is not None:
+            return payload
+
+        item = getattr(event, "item", None)
+        if getattr(item, "type", None) == _AZURE_AI_SEARCH_CALL_OUTPUT_TYPE:
+            return RawOpenAIChatClient._parse_azure_ai_search_output_payload(getattr(item, "output", None))
+        return None
+
+    @staticmethod
+    def _extract_azure_ai_search_get_urls(event: Any) -> list[str]:
+        """Extract per-document Azure AI Search REST URLs from a streamed Responses event."""
+        event_type = getattr(event, "type", None)
+        if event_type not in _AZURE_AI_SEARCH_OUTPUT_EVENT_TYPES and not (
+            isinstance(event_type, str) and event_type.startswith(_AZURE_AI_SEARCH_OUTPUT_EVENT_PREFIX)
+        ):
+            return []
+
+        payload = RawOpenAIChatClient._extract_azure_ai_search_output_payload(event)
+        if payload is None:
+            return []
+
+        get_urls = payload.get("get_urls")
+        if not isinstance(get_urls, Sequence) or isinstance(get_urls, (str, bytes, bytearray)):
+            return []
+
+        urls: list[str] = []
+        for url in cast("Sequence[object]", get_urls):
+            if isinstance(url, str) and url:
+                urls.append(url)
+        return urls
+
+    @staticmethod
+    def _azure_ai_search_doc_index(annotation: Annotation) -> int | None:
+        """Return the document index encoded in a Foundry Azure AI Search `doc_N` citation title."""
+        title = annotation.get("title")
+        if not isinstance(title, str) or not title.startswith("doc_"):
+            return None
+        index_text = title.removeprefix("doc_")
+        if not index_text.isdigit():
+            return None
+        return int(index_text)
+
+    @classmethod
+    def _enrich_streamed_azure_ai_search_citations(cls, updates: Sequence[ChatResponseUpdate]) -> None:
+        """Enrich streamed Azure AI Search citation annotations with per-document REST URLs."""
+        # Azure AI Search citations are numbered with global `doc_N` ordinals across the
+        # whole streamed response, so concatenate `get_urls` in event order before resolving them.
+        get_urls: list[str] = []
+        for update in updates:
+            get_urls.extend(cls._extract_azure_ai_search_get_urls(update.raw_representation))
+        if not get_urls:
+            return
+
+        for update in updates:
+            for content in update.contents:
+                if content.type != "text" or not content.annotations:
+                    continue
+                for annotation in content.annotations:
+                    if annotation.get("type") != "citation" or annotation.get("file_id"):
+                        continue
+
+                    doc_index = cls._azure_ai_search_doc_index(annotation)
+                    if doc_index is None or doc_index >= len(get_urls):
+                        continue
+
+                    additional_properties = annotation.get("additional_properties")
+                    if not isinstance(additional_properties, dict):
+                        additional_properties = {}
+                        annotation["additional_properties"] = additional_properties
+                    if "get_url" in additional_properties:
+                        continue
+
+                    additional_properties["get_url"] = get_urls[doc_index]
+
+    @staticmethod
+    def _extract_mcp_search_documents_from_text(text: str) -> dict[str, Mapping[str, Any]]:
+        """Extract MCP search-index document metadata JSON objects from hosted-MCP output text."""
+        documents: dict[str, Mapping[str, Any]] = {}
+        decoder = json.JSONDecoder()
+        start = 0
+        while True:
+            object_start = text.find("{", start)
+            if object_start < 0:
+                return documents
+            try:
+                value, offset = decoder.raw_decode(text[object_start:])
+            except json.JSONDecodeError:
+                start = object_start + 1
+                continue
+            if isinstance(value, Mapping):
+                document = cast("Mapping[str, Any]", value)
+                document_id = document.get("id")
+                if isinstance(document_id, str) and document_id:
+                    documents[document_id] = document
+            start = object_start + offset
+
+    @classmethod
+    def _extract_mcp_search_documents_from_content(cls, content: Content) -> dict[str, Mapping[str, Any]]:
+        """Extract MCP search-index document metadata from an MCP tool-result content item."""
+        documents: dict[str, Mapping[str, Any]] = {}
+        if content.type != "mcp_server_tool_result":
+            return documents
+
+        def _add_from_output(output: Any) -> None:
+            if isinstance(output, str):
+                documents.update(cls._extract_mcp_search_documents_from_text(output))
+                return
+            if isinstance(output, Content):
+                if output.type == "text" and isinstance(output.text, str):
+                    documents.update(cls._extract_mcp_search_documents_from_text(output.text))
+                return
+            if isinstance(output, Sequence) and not isinstance(output, (str, bytes, bytearray)):
+                for item in cast("Sequence[object]", output):
+                    _add_from_output(item)
+
+        _add_from_output(content.output)
+        raw_output = getattr(content.raw_representation, "output", None)
+        _add_from_output(raw_output)
+        return documents
+
+    @staticmethod
+    def _mcp_search_document_id(annotation: Annotation) -> str | None:
+        """Return the document id encoded in an `mcp://searchindex/<id>` citation."""
+        for key in ("url", "title"):
+            value = annotation.get(key)
+            if isinstance(value, str) and value.startswith("mcp://searchindex/"):
+                return value.removeprefix("mcp://searchindex/").split("?", 1)[0].split("#", 1)[0]
+        return None
+
+    @classmethod
+    def _enrich_mcp_search_citations(cls, contents: Sequence[Content]) -> None:
+        """Add MCP search-index document metadata to matching citation annotations."""
+        documents: dict[str, Mapping[str, Any]] = {}
+        for content in contents:
+            documents.update(cls._extract_mcp_search_documents_from_content(content))
+        if not documents:
+            return
+
+        for content in contents:
+            if content.type != "text" or not content.annotations:
+                continue
+            for annotation in content.annotations:
+                document_id = cls._mcp_search_document_id(annotation)
+                if document_id is None:
+                    continue
+                document = documents.get(document_id)
+                if document is None:
+                    continue
+                additional_properties = annotation.setdefault("additional_properties", {})
+                additional_properties.setdefault("mcp_document_id", document_id)
+                document_title = document.get("title")
+                if isinstance(document_title, str) and document_title:
+                    additional_properties.setdefault("document_title", document_title)
+                source = document.get("source")
+                if isinstance(source, str) and source:
+                    additional_properties.setdefault("source", source)
+
+    @staticmethod
     def _get_search_tool_name(item_type: str) -> str:
         """Map OpenAI search output item types to unified content tool names."""
         return "web_search" if item_type == "web_search_call" else "file_search"
@@ -1886,7 +2188,11 @@ class RawOpenAIChatClient(  # type: ignore[misc]
         metadata: dict[str, Any] = response.metadata or {}
         contents: list[Content] = []
         local_shell_tool_name = self._get_local_shell_tool_name(options.get("tools"))
-        for item in response.output:  # type: ignore[reportUnknownMemberType]
+        try:
+            response_outputs = response.output  # type: ignore[reportUnknownMemberType]
+        except AttributeError:
+            response_outputs = []
+        for item in response_outputs:  # type: ignore[reportUnknownVariableType]
             match item.type:
                 # types:
                 # ParsedResponseOutputMessage[Unknown] |
@@ -2250,7 +2556,10 @@ class RawOpenAIChatClient(  # type: ignore[misc]
         # Set continuation_token when background operation is still in progress
         if response.status and response.status in ("in_progress", "queued"):
             args["continuation_token"] = OpenAIContinuationToken(response_id=response.id)
-        return ChatResponse(**args)
+        chat_response = ChatResponse(**args)
+        if chat_response.messages:
+            self._enrich_mcp_search_citations(chat_response.messages[0].contents)
+        return chat_response
 
     def _parse_chunk_from_openai(
         self,
@@ -2674,7 +2983,8 @@ class RawOpenAIChatClient(  # type: ignore[misc]
                     case "web_search_call" | "file_search_call":
                         contents.append(self._parse_search_tool_call_content(event_item))
                     case _:
-                        logger.debug("Unparsed event of type: %s: %s", event.type, event)
+                        if getattr(event_item, "type", None) != _AZURE_AI_SEARCH_CALL_OUTPUT_TYPE:
+                            logger.debug("Unparsed event of type: %s: %s", event.type, event)
             case (
                 "response.web_search_call.in_progress"
                 | "response.web_search_call.searching"
@@ -2802,11 +3112,15 @@ class RawOpenAIChatClient(  # type: ignore[misc]
                     if ann_url:
                         ann_start = _get_ann_value("start_index")
                         ann_end = _get_ann_value("end_index")
+                        annotation_properties: dict[str, Any] = {"annotation_index": event.annotation_index}
+                        ann_get_url = _get_ann_value("get_url")
+                        if ann_get_url is not None:
+                            annotation_properties["get_url"] = ann_get_url
                         annotation_obj = Annotation(
                             type="citation",
                             title=_get_ann_value("title") or "",
                             url=str(ann_url),
-                            additional_properties={"annotation_index": event.annotation_index},
+                            additional_properties=annotation_properties,
                             raw_representation=annotation,
                         )
                         if ann_start is not None and ann_end is not None:
@@ -2839,8 +3153,11 @@ class RawOpenAIChatClient(  # type: ignore[misc]
                     )
                 elif getattr(done_item, "type", None) in ("web_search_call", "file_search_call"):
                     contents.append(self._parse_search_tool_result_content(done_item))
+                elif getattr(done_item, "type", None) == _AZURE_AI_SEARCH_CALL_OUTPUT_TYPE:
+                    pass
             case _:
-                logger.debug("Unparsed event of type: %s: %s", event.type, event)
+                if not isinstance(event.type, str) or not event.type.startswith(_AZURE_AI_SEARCH_OUTPUT_EVENT_PREFIX):
+                    logger.debug("Unparsed event of type: %s: %s", event.type, event)
 
         return ChatResponseUpdate(
             contents=contents,
@@ -2860,10 +3177,16 @@ class RawOpenAIChatClient(  # type: ignore[misc]
             output_token_count=usage.output_tokens,
             total_token_count=usage.total_tokens,
         )
-        if usage.input_tokens_details and usage.input_tokens_details.cached_tokens:
-            details["openai.cached_input_tokens"] = usage.input_tokens_details.cached_tokens  # type: ignore[typeddict-unknown-key]
-        if usage.output_tokens_details and usage.output_tokens_details.reasoning_tokens:
-            details["openai.reasoning_tokens"] = usage.output_tokens_details.reasoning_tokens  # type: ignore[typeddict-unknown-key]
+        if usage.input_tokens_details:
+            cached_tokens = cast("int | None", getattr(usage.input_tokens_details, "cached_tokens", None))
+            if cached_tokens is not None:
+                details["openai.cached_input_tokens"] = cached_tokens  # type: ignore[typeddict-unknown-key]
+                details["cache_read_input_token_count"] = cached_tokens
+        if usage.output_tokens_details:
+            reasoning_tokens = cast("int | None", getattr(usage.output_tokens_details, "reasoning_tokens", None))
+            if reasoning_tokens is not None:
+                details["openai.reasoning_tokens"] = reasoning_tokens  # type: ignore[typeddict-unknown-key]
+                details["reasoning_output_token_count"] = reasoning_tokens
         return details
 
     def _get_metadata_from_response(self, output: Any) -> dict[str, Any]:

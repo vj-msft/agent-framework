@@ -33,7 +33,7 @@ IConfigurationRoot configuration = new ConfigurationBuilder()
 
 string? apiKey = configuration["OPENAI_API_KEY"];
 string model = configuration["OPENAI_CHAT_MODEL_NAME"] ?? "gpt-5.4-mini";
-string? endpoint = configuration["AZURE_AI_PROJECT_ENDPOINT"];
+string? endpoint = configuration["FOUNDRY_PROJECT_ENDPOINT"];
 string[] agentUrls = (builder.Configuration["urls"] ?? "http://localhost:5000").Split(';');
 
 var invoiceQueryPlugin = new InvoiceQuery();
@@ -100,6 +100,10 @@ else
 {
     throw new ArgumentException("Either A2AServer:ApiKey or A2AServer:ConnectionString & agentName must be provided");
 }
+
+// When running in production, make sure to use an SessionIsolationKeyProvider, e.g. ClaimsIdentity-based
+// if using Claims-based Identity for Authentication/Authorization
+// builder.Services.UseClaimsBasedSessionIsolation(new() { ClaimType = ClaimTypes.NameIdentifier });
 
 builder.AddA2AServer(hostA2AAgent);
 

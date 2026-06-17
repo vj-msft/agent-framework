@@ -149,6 +149,108 @@ def test_anthropic_client_init_auto_create_client(
     assert client.model == anthropic_unit_test_env["ANTHROPIC_CHAT_MODEL"]
 
 
+def test_anthropic_client_init_with_base_url(
+    anthropic_unit_test_env: dict[str, str],
+) -> None:
+    """Test AnthropicClient accepts a base_url and passes it to the underlying AsyncAnthropic client."""
+    custom_url = "https://custom-anthropic-endpoint.com"
+    client = AnthropicClient(
+        api_key=anthropic_unit_test_env["ANTHROPIC_API_KEY"],
+        model=anthropic_unit_test_env["ANTHROPIC_CHAT_MODEL"],
+        base_url=custom_url,
+    )
+
+    assert custom_url in str(client.anthropic_client.base_url)
+
+
+def test_raw_anthropic_client_init_with_base_url(
+    anthropic_unit_test_env: dict[str, str],
+) -> None:
+    """Test RawAnthropicClient accepts a base_url and passes it to the underlying AsyncAnthropic client."""
+    custom_url = "https://custom-anthropic-endpoint.com"
+    client = RawAnthropicClient(
+        api_key=anthropic_unit_test_env["ANTHROPIC_API_KEY"],
+        model=anthropic_unit_test_env["ANTHROPIC_CHAT_MODEL"],
+        base_url=custom_url,
+    )
+
+    assert custom_url in str(client.anthropic_client.base_url)
+
+
+@pytest.mark.parametrize(
+    "override_env_param_dict",
+    [{"ANTHROPIC_BASE_URL": "https://env-base-url.example.com"}],
+    indirect=True,
+)
+def test_anthropic_client_init_base_url_from_env(
+    anthropic_unit_test_env: dict[str, str],
+) -> None:
+    """Test AnthropicClient picks up base_url from ANTHROPIC_BASE_URL env variable when not passed explicitly."""
+    client = AnthropicClient(
+        api_key=anthropic_unit_test_env["ANTHROPIC_API_KEY"],
+        model=anthropic_unit_test_env["ANTHROPIC_CHAT_MODEL"],
+    )
+
+    assert anthropic_unit_test_env["ANTHROPIC_BASE_URL"] in str(client.anthropic_client.base_url)
+
+
+@pytest.mark.parametrize(
+    "override_env_param_dict",
+    [{"ANTHROPIC_BASE_URL": "https://env-base-url.example.com"}],
+    indirect=True,
+)
+def test_raw_anthropic_client_init_base_url_from_env(
+    anthropic_unit_test_env: dict[str, str],
+) -> None:
+    """Test RawAnthropicClient picks up base_url from ANTHROPIC_BASE_URL env variable when not passed explicitly."""
+    client = RawAnthropicClient(
+        api_key=anthropic_unit_test_env["ANTHROPIC_API_KEY"],
+        model=anthropic_unit_test_env["ANTHROPIC_CHAT_MODEL"],
+    )
+
+    assert anthropic_unit_test_env["ANTHROPIC_BASE_URL"] in str(client.anthropic_client.base_url)
+
+
+@pytest.mark.parametrize(
+    "override_env_param_dict",
+    [{"ANTHROPIC_BASE_URL": "https://env-base-url.example.com"}],
+    indirect=True,
+)
+def test_anthropic_client_init_explicit_base_url_wins_over_env(
+    anthropic_unit_test_env: dict[str, str],
+) -> None:
+    """Test that an explicit base_url kwarg takes priority over ANTHROPIC_BASE_URL env variable."""
+    explicit_url = "https://explicit-endpoint.example.com"
+    client = AnthropicClient(
+        api_key=anthropic_unit_test_env["ANTHROPIC_API_KEY"],
+        model=anthropic_unit_test_env["ANTHROPIC_CHAT_MODEL"],
+        base_url=explicit_url,
+    )
+
+    assert explicit_url in str(client.anthropic_client.base_url)
+    assert anthropic_unit_test_env["ANTHROPIC_BASE_URL"] not in str(client.anthropic_client.base_url)
+
+
+@pytest.mark.parametrize(
+    "override_env_param_dict",
+    [{"ANTHROPIC_BASE_URL": "https://env-base-url.example.com"}],
+    indirect=True,
+)
+def test_raw_anthropic_client_init_explicit_base_url_wins_over_env(
+    anthropic_unit_test_env: dict[str, str],
+) -> None:
+    """Test that an explicit base_url kwarg takes priority over ANTHROPIC_BASE_URL env variable."""
+    explicit_url = "https://explicit-endpoint.example.com"
+    client = RawAnthropicClient(
+        api_key=anthropic_unit_test_env["ANTHROPIC_API_KEY"],
+        model=anthropic_unit_test_env["ANTHROPIC_CHAT_MODEL"],
+        base_url=explicit_url,
+    )
+
+    assert explicit_url in str(client.anthropic_client.base_url)
+    assert anthropic_unit_test_env["ANTHROPIC_BASE_URL"] not in str(client.anthropic_client.base_url)
+
+
 def test_anthropic_client_init_missing_api_key() -> None:
     """Test AnthropicClient initialization when API key is missing."""
     with patch("agent_framework_anthropic._chat_client.load_settings") as mock_load:
@@ -381,6 +483,48 @@ def test_prepare_message_for_anthropic_text_reasoning_with_signature(
     assert result["content"][0]["type"] == "thinking"
     assert result["content"][0]["thinking"] == "Let me think about this..."
     assert result["content"][0]["signature"] == "sig_abc123"
+
+
+def test_prepare_message_for_anthropic_attaches_signature_only_reasoning(
+    mock_anthropic_client: MagicMock,
+) -> None:
+    client = create_test_anthropic_client(mock_anthropic_client)
+    message = Message(
+        role="assistant",
+        contents=[
+            Content.from_text_reasoning(text="Let me think about this..."),
+            Content.from_text_reasoning(text=None, protected_data="sig_abc123"),
+        ],
+    )
+
+    result = client._prepare_message_for_anthropic(message)
+
+    assert result["content"] == [
+        {"type": "thinking", "thinking": "Let me think about this...", "signature": "sig_abc123"}
+    ]
+
+
+def test_prepare_message_for_anthropic_skips_orphan_signature_only_reasoning(
+    mock_anthropic_client: MagicMock,
+) -> None:
+    client = create_test_anthropic_client(mock_anthropic_client)
+    message = Message(
+        role="assistant",
+        contents=[
+            Content.from_text_reasoning(text=None, protected_data="sig_abc123"),
+            Content.from_function_call(
+                call_id="call_123",
+                name="get_weather",
+                arguments={"location": "San Francisco"},
+            ),
+        ],
+    )
+
+    result = client._prepare_message_for_anthropic(message)
+
+    assert len(result["content"]) == 1
+    assert result["content"][0]["type"] == "tool_use"
+    assert result["content"][0]["id"] == "call_123"
 
 
 def test_prepare_message_for_anthropic_mcp_server_tool_call(
@@ -2210,6 +2354,27 @@ def test_parse_usage_with_cache_tokens(mock_anthropic_client: MagicMock) -> None
     assert result["input_token_count"] == 100
     assert result["anthropic.cache_creation_input_tokens"] == 20
     assert result["anthropic.cache_read_input_tokens"] == 30
+    assert result["cache_creation_input_token_count"] == 20
+    assert result["cache_read_input_token_count"] == 30
+
+
+def test_parse_usage_preserves_zero_cache_tokens(mock_anthropic_client: MagicMock) -> None:
+    """Test parsing usage preserves zero-valued mapped cache tokens."""
+    client = create_test_anthropic_client(mock_anthropic_client)
+
+    mock_usage = MagicMock()
+    mock_usage.input_tokens = 100
+    mock_usage.output_tokens = 50
+    mock_usage.cache_creation_input_tokens = 0
+    mock_usage.cache_read_input_tokens = 0
+
+    result = client._parse_usage_from_anthropic(mock_usage)
+
+    assert result is not None
+    assert result["anthropic.cache_creation_input_tokens"] == 0
+    assert result["cache_creation_input_token_count"] == 0
+    assert result["anthropic.cache_read_input_tokens"] == 0
+    assert result["cache_read_input_token_count"] == 0
 
 
 # Code Execution Result Tests

@@ -55,7 +55,7 @@ public sealed class FileMemoryProvider : AIContextProvider, IDisposable
 
         - Use descriptive file names (e.g., "projectarchitecture.md", "userpreferences.md").
         - Include a description when saving a file to help with future discovery.
-        - Before starting new tasks, use FileMemory_ListFiles and FileMemory_SearchFiles to check for relevant existing memories.
+        - Before starting new tasks, use FileMemory_ListFiles and FileMemory_SearchFiles to check for relevant existing memories to avoid duplicate work.
         - Keep memories up-to-date by overwriting files when information changes.
         - When you receive large amounts of data (e.g., downloaded web pages, API responses, research results),
           save them to files if they will be required later, so that they are not lost when older context is compacted or truncated.
@@ -296,7 +296,7 @@ public sealed class FileMemoryProvider : AIContextProvider, IDisposable
     {
         FileMemoryState state = this._sessionState.GetOrInitializeState(AIAgent.CurrentRunContext?.Session);
         string? pattern = string.IsNullOrWhiteSpace(filePattern) ? null : filePattern;
-        IReadOnlyList<FileSearchResult> results = await this._fileStore.SearchFilesAsync(state.WorkingFolder, regexPattern, pattern, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<FileSearchResult> results = await this._fileStore.SearchFilesAsync(state.WorkingFolder, regexPattern, pattern, recursive: false, cancellationToken).ConfigureAwait(false);
 
         // Filter out internal files (description sidecars and memory index) so they stay hidden.
         var filtered = new List<FileSearchResult>(results.Count);

@@ -22,6 +22,9 @@ var unitConverter = new UnitConverterSkill();
 var skillsProvider = new AgentSkillsProvider(unitConverter);
 
 // --- Agent Setup ---
+// WARNING: DefaultAzureCredential is convenient for development but requires careful consideration in production.
+// In production, consider using a specific credential (e.g., ManagedIdentityCredential) to avoid
+// latency issues, unintended credential probing, and potential security risks from fallback mechanisms.
 AIAgent agent = new AzureOpenAIClient(new Uri(endpoint), new DefaultAzureCredential())
     .GetResponsesClient()
     .AsAIAgent(new ChatClientAgentOptions
@@ -51,7 +54,7 @@ Console.WriteLine($"Agent: {response.Text}");
 /// Properties annotated with <see cref="AgentSkillResourceAttribute"/> are automatically
 /// discovered as skill resources, and methods annotated with <see cref="AgentSkillScriptAttribute"/>
 /// are automatically discovered as skill scripts. Alternatively,
-/// <see cref="AgentSkill.Resources"/> and <see cref="AgentSkill.Scripts"/> can be overridden.
+/// <see cref="AgentClassSkill{TSelf}.Resources"/> and <see cref="AgentClassSkill{TSelf}.Scripts"/> can be overridden.
 /// </remarks>
 internal sealed class UnitConverterSkill : AgentClassSkill<UnitConverterSkill>
 {
